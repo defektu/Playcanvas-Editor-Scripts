@@ -4,10 +4,30 @@
 // @match       https://playcanvas.com/editor/*
 // @exclude-match https://playcanvas.com/editor/code/*
 // @grant       none
-// @version     0.1
+// @version     0.2
 // @author      @defektu
 // @description Adds Subsurface Scattering in editor
 // ==/UserScript==
+
+function replaceLast(input, search, replace) {
+  var a = input.split("");
+  var length = search.length;
+  if (input.lastIndexOf(search) != -1) {
+    for (
+      var i = input.lastIndexOf(search);
+      i < input.lastIndexOf(search) + length;
+      i++
+    ) {
+      if (i == input.lastIndexOf(search)) {
+        a[i] = replace;
+      } else {
+        delete a[i];
+      }
+    }
+  }
+
+  return a.join("");
+}
 
 (function () {
   "use strict";
@@ -15,138 +35,98 @@
   const onEngineLoaded = function () {
     console.log("%c SSS loaded ", logCssStyle);
 
-    var falloffLinearPS = `
-#define LIGHTS_AVAILABLE
+    // falloffLinearPS changes
 
-int pointLightCount = 0;
-vec3 lightPointsPos[255];
-float lightPointsRad[255];
+    pc.shaderChunks.falloffLinearPS = pc.shaderChunks.falloffLinearPS.replace(
+      "float getFalloffLinear",
+      `
+            #define LIGHTS_AVAILABLE
 
-float getFalloffLinear(float lightRadius, vec3 lightDir) {
-    float d = length(lightDir);
+            int pointLightCount = 0;
+            vec3 lightPointsPos[255];
+            float lightPointsRad[255];
 
-    lightPointsRad[pointLightCount] = lightRadius;
-    pointLightCount = pointLightCount + 1;
+            float getFalloffLinear
+            `,
+    );
 
-    return max(((lightRadius - d) / lightRadius), 0.0);
-}
-`;
+    pc.shaderChunks.falloffLinearPS = pc.shaderChunks.falloffLinearPS.replace(
+      "return",
+      `
+      lightPointsRad[pointLightCount] = lightRadius;
+      pointLightCount = pointLightCount + 1;
 
-    var lightDirPointPS = `
-void getLightDirPoint(vec3 lightPosW) {
+      return
+      `,
+    );
 
-    dLightDirW = vPositionW - lightPosW;
-    dLightDirNormW = normalize(dLightDirW);
-    dLightPosW = lightPosW;
+    // lightDirPointPS changes
 
-    lightPointsPos[pointLightCount] = dLightPosW;
-}
-`;
-    var refractionDynamicPS = `
-float thicknessDistortion = -0.2;
-float thicknessAmbient = 0.0;
-float thicknessAttenuation = 1.0;
-float thicknessPower = 2.;
-float thicknessScale = 1.;
+    pc.shaderChunks.lightDirPointPS = pc.shaderChunks.lightDirPointPS.replace(
+      "}",
+      `
+          lightPointsPos[pointLightCount] = dLightPosW;
+      }
+      `,
+    );
 
+    var sssPS = `
+              float thicknessDistortion = -0.2;
+              float thicknessAmbient = 0.0;
+              float thicknessAttenuation = 1.0;
+              float thicknessPower = 2.;
+              float thicknessScale = 1.;
 
-// Refraction PS
+              #if undefined(LIGHTS_AVAILABLE)
+                  // int pointLightCount = 0;
+              #else
+                  int pointLightCount = -1;
+              #endif
 
+              vec3 addSSS(
+                  vec3 worldNormal,
+                  vec3 viewDir,
+                  float thickness,
+                  float gloss,
+                  vec3 specularity,
+                  vec3 albedo,
+                  float transmission
+                  #if defined(LIT_IRIDESCENCE)
+                      , vec3 iridescenceFresnel,
+                      IridescenceArgs iridescence
+                  #endif
+              ) {
+                      float thicknessFalloff = thicknessPower;
 
-uniform float material_refractionIndex;
-uniform float material_invAttenuationDistance;
-uniform vec3 material_attenuation;
+                      float attenuation;
+                      for (int i = 0; i < pointLightCount; i++)
+                      {
+                          float lightScale;
+                          lightScale = lightPointsRad[i] * thicknessScale;
 
-#if undefined(LIGHTS_AVAILABLE)
-    // int pointLightCount = 0;
-#else
-    int pointLightCount = -1;
-#endif
+                          vec3 geometryNormal = dNormalW.xyz;
+                          vec3 geometryViewDir = dViewDirW;
+                          float SSS = pow(saturate(lightScale / distance(lightPointsPos[i].xyz + (geometryNormal * thicknessDistortion), vPositionW.xyz)), (thicknessFalloff * thicknessFalloff));
 
-vec3 addSSS(
-    vec3 worldNormal,
-    vec3 viewDir,
-    float thickness,
-    float gloss,
-    vec3 specularity,
-    vec3 albedo,
-    float transmission
-    #if defined(LIT_IRIDESCENCE)
-        , vec3 iridescenceFresnel,
-        IridescenceArgs iridescence
-    #endif
-) {
-        float thicknessFalloff = thicknessPower;
+                          SSS *= thicknessAttenuation;
+                          attenuation += SSS;
+                      };
 
-        float attenuation;
-        for (int i = 0; i < pointLightCount; i++)
-        {
-            float lightScale;
-            lightScale = lightPointsRad[i] * thicknessScale;
+                      vec3 thicknessCalc = vec3(material_attenuation.rgb * thickness);
 
-            vec3 geometryNormal = dNormalW.xyz;
-            vec3 geometryViewDir = dViewDirW;
-            float SSS = pow(saturate(lightScale / distance(lightPointsPos[i].xyz + (geometryNormal * thicknessDistortion), vPositionW.xyz)), (thicknessFalloff * thicknessFalloff));
+                      vec4 finalCol;
 
-            SSS *= thicknessAttenuation;
-            attenuation += SSS;
-        };
+                      finalCol.rgb += thicknessCalc * (attenuation + thicknessAmbient) ;
 
-        vec3 thicknessCalc = vec3(material_attenuation.rgb * thickness);
+                      return finalCol.rgb;
 
-        vec4 finalCol;
-
-        finalCol.rgb += thicknessCalc * (attenuation + thicknessAmbient) ;
-
-        return finalCol.rgb;
-
-}
-
-vec3 refract2(vec3 viewVec, vec3 normal, float IOR) {
-    float vn = dot(viewVec, normal);
-    float k = 1.0 - IOR * IOR * (1.0 - vn * vn);
-    vec3 refrVec = IOR * viewVec - (IOR * vn + sqrt(k)) * normal;
-    return refrVec;
-}
-
-void addRefraction(
-    vec3 worldNormal,
-    vec3 viewDir,
-    float thickness,
-    float gloss,
-    vec3 specularity,
-    vec3 albedo,
-    float transmission
-#if defined(LIT_IRIDESCENCE)
-    , vec3 iridescenceFresnel,
-    IridescenceArgs iridescence
-#endif
-) {
-    vec3 modelScale;
-    modelScale.x = length(vec3(matrix_model[0].xyz));
-    modelScale.y = length(vec3(matrix_model[1].xyz));
-    modelScale.z = length(vec3(matrix_model[2].xyz));
-    vec3 refractionVector = normalize(refract(-viewDir, worldNormal, material_refractionIndex)) * thickness * modelScale;
-    vec4 pointOfRefraction = vec4(vPositionW + refractionVector, 1.0);
-    vec4 projectionPoint = matrix_viewProjection * pointOfRefraction;
-    vec2 uv = getGrabScreenPos(projectionPoint);
-    float iorToRoughness = (1.0 - gloss) * clamp((1.0 / material_refractionIndex) * 2.0 - 2.0, 0.0, 1.0);
-    float refractionLod = log2(uScreenSize.x) * iorToRoughness;
-    vec3 refraction = texture2DLodEXT(uSceneColorMap, uv, refractionLod).rgb;
-    vec3 transmittance;
-    if (material_invAttenuationDistance != 0.0) {
-        vec3 attenuation = -log(material_attenuation) * material_invAttenuationDistance;
-        transmittance = exp(-attenuation * length(refractionVector));
-    }
-    else {
-        transmittance = refraction;
-    }
-
-    vec3 fresnel = vec3(1.0) - getFresnel(dot(viewDir, worldNormal), gloss, specularity);
-    dDiffuseLight = mix(dDiffuseLight, refraction * transmittance * fresnel, transmission);
-
-
-    #if undefined(LIGHTS_AVAILABLE)
+              }
+              `;
+    pc.shaderChunks.refractionDynamicPS = replaceLast(
+      pc.shaderChunks.refractionDynamicPS,
+      "}",
+      `
+      #if undefined(LIGHTS_AVAILABLE)
         dDiffuseLight += addSSS(
             worldNormal,
             viewDir,
@@ -160,24 +140,22 @@ void addRefraction(
                 IridescenceArgs iridescence
             #endif
         );
-    #endif
-}
-`;
+      #endif
+      }
+      `,
+    );
 
-    console.log(pc.shaderChunks);
-
-    pc.shaderChunks.falloffLinearPS = falloffLinearPS;
-
-    pc.shaderChunks.lightDirPointPS = lightDirPointPS;
-
-    pc.shaderChunks.refractionDynamicPS = refractionDynamicPS;
+    pc.shaderChunks.refractionDynamicPS =
+      pc.shaderChunks.refractionDynamicPS.replace(
+        "void addRefraction",
+        sssPS + "void addRefraction",
+      );
   };
 
-  // Wait for the PlayCanvas application to be loaded
   const intervalId = setInterval(function () {
     if (pc.Application.getApplication()) {
       onEngineLoaded();
       clearInterval(intervalId);
     }
-  }, 500);
+  }, 200);
 })();
